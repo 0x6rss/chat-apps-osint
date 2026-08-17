@@ -113,14 +113,15 @@ are all inside that one file.
 
 ## Run
 
+Recommended command (works reliably on Windows PowerShell):
+
+```bash
+python wa_peer.py --raw raw.jsonl
+```
+
 1. Open WhatsApp for Windows and make sure it is signed in.
-2. Start the tool:
-
-   ```bash
-   python wa_peer.py > dossier.json
-   ```
-
-3. Wait for this line (it goes to stderr, not the file):
+2. Run the command above.
+3. Wait for this line:
 
    ```
    attached to WhatsApp.Root.exe - N hooks. Place or accept a call, then Ctrl+C.
@@ -128,8 +129,22 @@ are all inside that one file.
 
 4. **Place a call or accept an incoming call.** The longer the call runs, and the more the
    peer speaks, the fuller the audio-level series. Around 20-30 seconds is enough.
-5. End the call, return to the terminal, and press **Ctrl+C**. The JSON report is written
-   to `dossier.json`.
+5. **End the call inside WhatsApp first**, wait 2-3 seconds, then return to the terminal and
+   press **Ctrl+C**. The report is printed to the screen.
+
+### Two things that will bite you
+
+- **Do not use `> dossier.json` with Ctrl+C in PowerShell.** PowerShell discards a
+  redirected file when you interrupt with Ctrl+C, leaving `dossier.json` empty (0 bytes)
+  even though the capture worked. Either run without redirection (the report prints to the
+  screen), or use `--raw raw.jsonl` so events are written to the file as they arrive, or use
+  `--seconds N` so the tool stops on its own. If you still want a saved report file, use
+  `--seconds N > dossier.json` (auto-stop writes the file cleanly; Ctrl+C does not).
+- **End the call before you stop the tool.** Fields like `app_version`, `device_class`,
+  `hardware_year_class`, `medium`, and `nat` come from the call's end-of-call statistics,
+  which WhatsApp only produces when the call actually ends. If you press Ctrl+C while the
+  call is still connected, those fields come back `null` (the IP, LAN address, platform, and
+  speech series still work). Hang up in WhatsApp first, then stop the tool.
 
 ### Variants
 
@@ -174,6 +189,8 @@ call `video_enabled == 0`).
 
 | Symptom | Cause / fix |
 |---|---|
+| `dossier.json` is empty / 0 bytes | You used `> dossier.json` and stopped with Ctrl+C in PowerShell; the redirected file is discarded. Run without redirection, or use `--raw`, or use `--seconds N` |
+| `app_version` / `device_class` / `medium` / `nat` all `null` | You stopped the tool while the call was still connected; these come from end-of-call stats. Hang up in WhatsApp first, then Ctrl+C |
 | `WhatsApp.Root.exe is not running` | Client closed, or a different process name; pass `--process` |
 | `hook_ready` arrived but `hooked` is short/empty | DLL version does not match the offsets (see above) |
 | No `endpoint` events | The call did not actually connect; the peer must answer and media must flow |
@@ -181,10 +198,4 @@ call `video_enabled == 0`).
 | Frida attach error | Frida version and Python bindings mismatch; `pip install -U frida` |
 
 ---
-
-## Files
-
-- `wa_peer.py` - the entire tool (agent + runner + report builder).
-- `requirements.txt` - the single dependency (Frida).
-- `README.md` - this file.
 
