@@ -61,6 +61,19 @@ var BUILDS = {
     wa_call_participant_get_audio_level:                 0x20B450,
     wa_call_participant_get_offer_msg:                   0x20A730,
   },
+  12709888: {   // WhatsAppDesktop 2.2636.100.0  (SizeOfImage 0xC1F000)
+    wa_call_set_field_stat_numeric:                       0x65730,
+    wa_call_set_field_stat_str:                           0x659E0,
+    parse_endpoint_address:                              0x28BFF0,
+    platform_to_cstr:                                    0x212170,
+    wa_transport_get_peer_public_addr_str:               0x4335B0,
+    wa_call_participant_get_peer_test_bucket_id_list_str: 0x210370,
+    wa_call_participant_get_peer_test_bucket_str:        0x210320,
+    wa_call_participant_get_multi_device_info_count:     0x210760,
+    wa_call_participant_get_active_device_info_const:    0x210680,
+    wa_call_participant_get_audio_level:                 0x211830,
+    wa_call_participant_get_offer_msg:                   0x210A50,
+  },
 };
 var RVA = null;   // selected at runtime from BUILDS by module size
 
