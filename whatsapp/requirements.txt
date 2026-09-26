@@ -1,1 +1,2 @@
 frida>=16.0
+pefile>=2023.2.7   # only needed to auto-resolve RVAs for a WhatsApp build not in the BUILDS cache
