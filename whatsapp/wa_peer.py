@@ -74,6 +74,19 @@ var BUILDS = {
     wa_call_participant_get_audio_level:                 0x211830,
     wa_call_participant_get_offer_msg:                   0x210A50,
   },
+  12722176: {   // WhatsAppDesktop 2.2637.100.0  (SizeOfImage 0xC22000)
+    wa_call_set_field_stat_numeric:                       0x65770,
+    wa_call_set_field_stat_str:                           0x65A20,
+    parse_endpoint_address:                              0x28F400,
+    platform_to_cstr:                                    0x2148C0,
+    wa_transport_get_peer_public_addr_str:               0x437AE0,
+    wa_call_participant_get_peer_test_bucket_id_list_str: 0x212AC0,
+    wa_call_participant_get_peer_test_bucket_str:        0x212A70,
+    wa_call_participant_get_multi_device_info_count:     0x212EB0,
+    wa_call_participant_get_active_device_info_const:    0x212DD0,
+    wa_call_participant_get_audio_level:                 0x213F80,
+    wa_call_participant_get_offer_msg:                   0x2131A0,
+  },
 };
 var RVA = null;   // selected at runtime from BUILDS by module size
 
@@ -130,24 +143,59 @@ function moduleSize(name) {
   return null;
 }
 
-function main() {
-  var base = moduleBase(VOIP);
-  if (base === null) { emit('error', { message: VOIP + ' not loaded' }); return; }
+// Like moduleBase/moduleSize but returns the whole module, so we also get its
+// on-disk .path — needed to auto-resolve an unknown build (see start()).
+function moduleObj(name) {
+  var lower = name.toLowerCase();
+  try {
+    if (typeof Process.findModuleByName === 'function') {
+      var m = Process.findModuleByName(name);
+      if (m) return m;
+    }
+  } catch (e) {}
+  try {
+    var mods = Process.enumerateModules();
+    for (var i = 0; i < mods.length; i++) {
+      if (String(mods[i].name).toLowerCase() === lower) return mods[i];
+    }
+  } catch (e) {}
+  return null;
+}
 
-  // Pick the RVA table for THIS build. If we don't recognise it, refuse to
-  // hook — planting hooks at stale offsets is exactly what crashes WhatsApp.
-  var size = moduleSize(VOIP);
-  RVA = BUILDS[size];
-  if (!RVA) {
-    emit('error', {
-      message: 'unknown ' + VOIP + ' build (size=' + size + ') — refusing to hook ' +
-               'so WhatsApp will not crash. Re-run resolve_rva.py against this DLL and ' +
-               'add a BUILDS[' + size + '] entry.',
-      module_size: size
-    });
-    return;
-  }
+// Decide where THIS build's RVA table comes from, then hook.
+//   - Known build  -> use the inline BUILDS cache (fast, offline, no deps).
+//   - Unknown build -> NOT a dead end any more: ask the Python side to derive
+//     the offsets straight from the DLL on disk (resolve_rva.py's method) and
+//     hook once they arrive. WhatsApp auto-updates constantly, so this is what
+//     keeps the tool working across versions without a hand-added BUILDS entry.
+// We only stay unhooked — the original fail-safe — if that resolution ALSO
+// fails, so a stale offset is never planted and WhatsApp never crashes.
+function start() {
+  var mod = moduleObj(VOIP);
+  if (mod === null) { emit('error', { message: VOIP + ' not loaded' }); return; }
+  var base = mod.base, size = mod.size;
 
+  if (BUILDS[size]) { RVA = BUILDS[size]; installHooks(base, size, 'cache'); return; }
+
+  emit('need_rva', { path: mod.path, size: size });
+  recv('rva_table', function (msg) {
+    if (!msg || !msg.rva) {
+      emit('error', {
+        message: 'unknown ' + VOIP + ' build (size=' + size + ') and auto-resolve ' +
+                 'failed' + (msg && msg.reason ? ' (' + msg.reason + ')' : '') +
+                 ' — refusing to hook so WhatsApp will not crash. Re-run ' +
+                 'resolve_rva.py against this DLL and add a BUILDS[' + size + '] entry.',
+        module_size: size
+      });
+      return;
+    }
+    RVA = msg.rva;
+    BUILDS[size] = msg.rva;   // cache for the rest of this session
+    installHooks(base, size, 'auto-resolved');
+  });
+}
+
+function installHooks(base, size, rva_source) {
   function at(n) { return base.add(RVA[n]); }
   var hooked = [];
 
@@ -294,13 +342,14 @@ function main() {
     hooked.push('peer_offer_msg');
   } catch (e) {}
 
-  emit('hook_ready', { module: VOIP, base: base.toString(), module_size: size, hooked: hooked });
+  emit('hook_ready', { module: VOIP, base: base.toString(), module_size: size,
+                       rva_source: rva_source, hooked: hooked });
 }
 
-if (moduleBase(VOIP) !== null) main();
+if (moduleBase(VOIP) !== null) start();
 else {
   var iv = setInterval(function () {
-    if (moduleBase(VOIP) !== null) { clearInterval(iv); main(); }
+    if (moduleBase(VOIP) !== null) { clearInterval(iv); start(); }
   }, 250);
   emit('waiting', { message: VOIP + ' not yet loaded' });
 }
@@ -1415,6 +1464,133 @@ def write_outputs(report, outdir=".", open_browser=True):
     return json_path, html_path
 
 
+# --- Runtime RVA auto-resolution -------------------------------------------
+# The agent holds an inline BUILDS cache keyed by the DLL's SizeOfImage. When
+# WhatsApp auto-updates, that size changes and the cache misses. Instead of
+# failing (the old behaviour, which is what issue #3 reported), the agent asks
+# us to derive the hook offsets from the loaded DLL on disk. This mirrors
+# resolve_rva.py: find each function's self-labeling __FUNCTION__ string-load
+# site in .text (a RIP-relative LEA), then map that site to the enclosing
+# .pdata RUNTIME_FUNCTION entry — the hookable function start. No new WhatsApp
+# build needs a hand-added BUILDS entry any more.
+
+RVA_TARGETS = [
+    "wa_call_set_field_stat_numeric",
+    "wa_call_set_field_stat_str",
+    "parse_endpoint_address",
+    "platform_to_cstr",
+    "wa_transport_get_peer_public_addr_str",
+    "wa_call_participant_get_peer_test_bucket_id_list_str",
+    "wa_call_participant_get_peer_test_bucket_str",
+    "wa_call_participant_get_multi_device_info_count",
+    "wa_call_participant_get_active_device_info_const",
+    "wa_call_participant_get_audio_level",
+    "wa_call_participant_get_offer_msg",
+]
+
+_REX = (0x48, 0x4C)
+_MODRM_RIP = {0x05, 0x0D, 0x15, 0x1D, 0x25, 0x2D, 0x35, 0x3D}
+
+
+def resolve_rvas_from_dll(path):
+    """Derive {name: rva} for RVA_TARGETS from the DLL at *path*.
+
+    Returns (table, size_of_image). Raises RuntimeError on any failure (pefile
+    missing, unreadable file, or a target whose assert literal is not found) so
+    the caller can fall back to the fail-closed 'refuse to hook' path.
+    """
+    import bisect
+    try:
+        import pefile
+    except ImportError:
+        raise RuntimeError("pefile not installed (pip install pefile)")
+    try:
+        pe = pefile.PE(path, fast_load=False)
+    except Exception as exc:
+        raise RuntimeError("cannot read DLL %r: %s" % (path, exc))
+
+    ib = pe.OPTIONAL_HEADER.ImageBase
+    secs = [(s.Name.rstrip(b"\x00").decode("ascii", "replace"),
+             ib + s.VirtualAddress, s.get_data()) for s in pe.sections]
+
+    strs = {}
+    for name, va, data in secs:
+        if name not in (".rdata", ".rodata", ".data"):
+            continue
+        start = None
+        for i, b in enumerate(data):
+            if 0x20 <= b < 0x7f:
+                if start is None:
+                    start = i
+            else:
+                if start is not None and i - start >= 4:
+                    try:
+                        strs[va + start] = data[start:i].decode("ascii")
+                    except UnicodeDecodeError:
+                        pass
+                start = None
+
+    byname = collections.defaultdict(list)
+    for name, va, data in secs:
+        if name != ".text":
+            continue
+        n = len(data)
+        i = 0
+        while i < n - 7:
+            if data[i] in _REX and data[i + 1] == 0x8D and data[i + 2] in _MODRM_RIP:
+                disp = struct.unpack_from("<i", data, i + 3)[0]
+                s = strs.get(va + i + 7 + disp)
+                if s is not None:
+                    byname[s].append(va + i)
+                i += 7
+                continue
+            i += 1
+
+    ents = []
+    d = getattr(pe, "DIRECTORY_ENTRY_EXCEPTION", None)
+    if d:
+        for e in d:
+            b = e.struct.BeginAddress
+            en = e.struct.EndAddress
+            if b:
+                ents.append((ib + b, ib + en))
+    ents.sort()
+    starts = [b for b, _ in ents]
+
+    def enclosing(site):
+        k = bisect.bisect_right(starts, site) - 1
+        if k < 0:
+            return None
+        b, en = ents[k]
+        return b if b <= site < en else None
+
+    table, missing = {}, []
+    for name in RVA_TARGETS:
+        votes = collections.Counter()
+        for site in byname.get(name, []):
+            ent = enclosing(site)
+            if ent is not None:
+                votes[ent - ib] += 1
+        if votes:
+            table[name] = votes.most_common(1)[0][0]
+        else:
+            missing.append(name)
+    if missing:
+        raise RuntimeError("could not resolve: %s" % ", ".join(missing))
+    return table, pe.OPTIONAL_HEADER.SizeOfImage
+
+
+def builds_snippet(size, table):
+    """A paste-ready BUILDS[...] block, so a maintainer can bake an auto-resolved
+    build into the committed table for offline/instant reuse."""
+    width = max(len(k) for k in RVA_TARGETS) + 1
+    lines = ["  %d: {   // WhatsAppDesktop <version>  (SizeOfImage 0x%X)" % (size, size)]
+    for k in RVA_TARGETS:
+        lines.append("    %s 0x%X," % ((k + ":").ljust(width), table[k]))
+    lines.append("  },")
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--process", default=PROCESS)
@@ -1452,10 +1628,28 @@ def main():
         if payload.get("event") == "error":
             print("[agent] %s" % payload.get("message"), file=sys.stderr)
             return
+        if payload.get("event") == "need_rva":
+            # Unknown build: derive the offsets from the DLL and hand them back,
+            # so the agent hooks this version instead of refusing.
+            size, path = payload.get("size"), payload.get("path")
+            try:
+                table, soi = resolve_rvas_from_dll(path)
+                script.post({"type": "rva_table", "rva": table})
+                print("[agent] unknown build (size=%s): auto-resolved %d RVAs from "
+                      "the DLL, hooking. To make it offline/instant next time, paste "
+                      "into the BUILDS table in wa_peer.py:\n%s"
+                      % (size, len(table), builds_snippet(soi, table)),
+                      file=sys.stderr)
+            except Exception as exc:
+                script.post({"type": "rva_table", "rva": None, "reason": str(exc)})
+                print("[agent] auto-resolve failed for size=%s: %s" % (size, exc),
+                      file=sys.stderr)
+            return
         if payload.get("event") == "hook_ready":
-            print("attached to %s (build size=%s) — %d hooks. Place or accept a call, "
-                  "then Ctrl+C."
+            print("attached to %s (build size=%s, rva=%s) — %d hooks. Place or accept "
+                  "a call, then Ctrl+C."
                   % (args.process, payload.get("module_size"),
+                     payload.get("rva_source"),
                      len(payload.get("hooked", []))), file=sys.stderr)
 
     script = session.create_script(AGENT)
